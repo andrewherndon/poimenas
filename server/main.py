@@ -1,0 +1,319 @@
+from fastapi import FastAPI, HTTPException, Depends, Request
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import Optional, Literal
+import os, time
+from datetime import datetime, date
+from dotenv import load_dotenv
+from db import get_db, init_db
+
+load_dotenv()
+
+app = FastAPI(title="Heimdall")
+API_KEY = os.environ["HEIMDALL_API_KEY"]
+VERSION = "0.1.0"
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.on_event("startup")
+def startup():
+    init_db()
+
+
+def auth(request: Request):
+    key = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+    if key != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+
+def today() -> str:
+    return date.today().isoformat()
+
+
+def get_active_rule(db):
+    today_str = today()
+    weekday = datetime.today().strftime("%a").lower()  # mon, tue, ...
+    row = db.execute(
+        """SELECT * FROM rules
+           WHERE day IN (?, ?, 'default')
+           ORDER BY CASE day WHEN ? THEN 2 WHEN ? THEN 1 ELSE 0 END DESC,
+                    priority DESC
+           LIMIT 1""",
+        (today_str, weekday, today_str, weekday),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def compute_lock(rule, stats, override) -> tuple[bool, str]:
+    if override["locked"]:
+        until = override["until_ts"]
+        if until == 0 or time.time() < until:
+            return True, override["reason"] or "manual"
+
+    if not rule:
+        return False, ""
+
+    t = rule["type"]
+
+    if t == "free":
+        return False, ""
+
+    elif t == "prerequisite":
+        anki_ok = rule["anki_target"] == 0 or stats["anki_cards"] >= rule["anki_target"]
+        seterra_ok = rule["seterra_target_seconds"] == 0 or stats["seterra_active_seconds"] >= rule["seterra_target_seconds"]
+        duolingo_ok = rule["duolingo_target_seconds"] == 0 or stats["duolingo_active_seconds"] >= rule["duolingo_target_seconds"]
+        if not (anki_ok and seterra_ok and duolingo_ok):
+            return True, "prerequisite"
+        return False, ""
+
+    elif t == "cap":
+        if rule["gaming_cap_seconds"] and stats["gaming_seconds"] >= rule["gaming_cap_seconds"]:
+            return True, "cap_exceeded"
+        return False, ""
+
+    elif t == "earn_more":
+        earned = (
+            stats["anki_cards"] * 60
+            + stats["seterra_active_seconds"]
+            + stats["duolingo_active_seconds"]
+        ) * rule["earn_rate"]
+        if stats["gaming_seconds"] >= rule["gaming_cap_seconds"] + earned:
+            return True, "cap_exceeded"
+        return False, ""
+
+    return False, ""
+
+
+def empty_stats() -> dict:
+    return {
+        "anki_cards": 0,
+        "seterra_active_seconds": 0,
+        "duolingo_active_seconds": 0,
+        "gaming_seconds": 0,
+        "last_heartbeat_ts": None,
+        "agent_version": None,
+    }
+
+
+# ── Status ────────────────────────────────────────────────────────────────────
+
+@app.get("/api/status", dependencies=[Depends(auth)])
+def get_status():
+    with get_db() as db:
+        row = db.execute("SELECT * FROM daily_stats WHERE date=?", (today(),)).fetchone()
+        stats = dict(row) if row else empty_stats()
+
+        override = dict(db.execute("SELECT * FROM lock_overrides WHERE id=1").fetchone())
+        rule = get_active_rule(db)
+        locked, reason = compute_lock(rule, stats, override)
+
+        last_hb = stats.get("last_heartbeat_ts")
+        agent_online = bool(last_hb and time.time() - last_hb < 90)
+
+        msgs = [
+            dict(r)
+            for r in db.execute(
+                "SELECT id, text FROM pending_messages WHERE delivered=0 ORDER BY ts"
+            ).fetchall()
+        ]
+
+    return {
+        "locked": locked,
+        "reason": reason,
+        "agent_online": agent_online,
+        "last_heartbeat": datetime.fromtimestamp(last_hb).isoformat() if last_hb else None,
+        "today": {
+            "anki_cards": stats["anki_cards"],
+            "anki_target": rule["anki_target"] if rule else 0,
+            "seterra_active_seconds": stats["seterra_active_seconds"],
+            "seterra_target_seconds": rule["seterra_target_seconds"] if rule else 0,
+            "duolingo_active_seconds": stats["duolingo_active_seconds"],
+            "duolingo_target_seconds": rule["duolingo_target_seconds"] if rule else 0,
+            "gaming_seconds": stats["gaming_seconds"],
+            "gaming_cap_seconds": rule["gaming_cap_seconds"] if rule else None,
+        },
+        "rule": rule,
+        "pending_messages": msgs,
+    }
+
+
+# ── Lock ──────────────────────────────────────────────────────────────────────
+
+class LockRequest(BaseModel):
+    locked: bool
+    reason: str = ""
+    duration_minutes: Optional[int] = None
+
+
+@app.post("/api/lock", dependencies=[Depends(auth)])
+def set_lock(body: LockRequest):
+    until_ts = 0.0
+    if body.locked and body.duration_minutes:
+        until_ts = time.time() + body.duration_minutes * 60
+    with get_db() as db:
+        db.execute(
+            "UPDATE lock_overrides SET locked=?, reason=?, until_ts=? WHERE id=1",
+            (int(body.locked), body.reason, until_ts),
+        )
+        db.execute(
+            "INSERT INTO events (ts, type, detail) VALUES (?,?,?)",
+            (time.time(), "lock" if body.locked else "unlock", body.reason),
+        )
+        db.commit()
+    return {"ok": True}
+
+
+# ── Message ───────────────────────────────────────────────────────────────────
+
+class MessageRequest(BaseModel):
+    text: str
+
+
+@app.post("/api/message", dependencies=[Depends(auth)])
+def send_message(body: MessageRequest):
+    with get_db() as db:
+        db.execute(
+            "INSERT INTO pending_messages (ts, text) VALUES (?,?)",
+            (time.time(), body.text),
+        )
+        db.execute(
+            "INSERT INTO events (ts, type, detail) VALUES (?,?,?)",
+            (time.time(), "message", body.text),
+        )
+        db.commit()
+    return {"ok": True}
+
+
+# ── Heartbeat ─────────────────────────────────────────────────────────────────
+
+class HeartbeatRequest(BaseModel):
+    agent_version: str = "0.0.0"
+    anki_cards: int = 0
+    seterra_active_seconds: int = 0
+    duolingo_active_seconds: int = 0
+    gaming_seconds: int = 0
+
+
+@app.post("/api/heartbeat", dependencies=[Depends(auth)])
+def heartbeat(body: HeartbeatRequest):
+    with get_db() as db:
+        db.execute(
+            """INSERT INTO daily_stats
+                   (date, anki_cards, seterra_active_seconds, duolingo_active_seconds,
+                    gaming_seconds, last_heartbeat_ts, agent_version)
+               VALUES (?,?,?,?,?,?,?)
+               ON CONFLICT(date) DO UPDATE SET
+                   anki_cards=excluded.anki_cards,
+                   seterra_active_seconds=excluded.seterra_active_seconds,
+                   duolingo_active_seconds=excluded.duolingo_active_seconds,
+                   gaming_seconds=excluded.gaming_seconds,
+                   last_heartbeat_ts=excluded.last_heartbeat_ts,
+                   agent_version=excluded.agent_version""",
+            (
+                today(), body.anki_cards, body.seterra_active_seconds,
+                body.duolingo_active_seconds, body.gaming_seconds,
+                time.time(), body.agent_version,
+            ),
+        )
+        db.execute("UPDATE pending_messages SET delivered=1 WHERE delivered=0")
+        db.commit()
+    return {"ok": True}
+
+
+# ── Rules ─────────────────────────────────────────────────────────────────────
+
+class RuleBody(BaseModel):
+    day: str
+    type: Literal["prerequisite", "cap", "earn_more", "free"]
+    anki_target: int = 0
+    seterra_target_seconds: int = 0
+    duolingo_target_seconds: int = 0
+    gaming_cap_seconds: int = 7200
+    earn_rate: float = 2.0
+    priority: int = 0
+
+
+@app.get("/api/rules", dependencies=[Depends(auth)])
+def list_rules():
+    with get_db() as db:
+        rows = db.execute("SELECT * FROM rules ORDER BY priority DESC, day").fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.post("/api/rules", dependencies=[Depends(auth)])
+def create_rule(body: RuleBody):
+    with get_db() as db:
+        cur = db.execute(
+            """INSERT INTO rules
+                   (day, type, anki_target, seterra_target_seconds, duolingo_target_seconds,
+                    gaming_cap_seconds, earn_rate, priority)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (body.day, body.type, body.anki_target, body.seterra_target_seconds,
+             body.duolingo_target_seconds, body.gaming_cap_seconds, body.earn_rate, body.priority),
+        )
+        db.execute(
+            "INSERT INTO events (ts, type, detail) VALUES (?,?,?)",
+            (time.time(), "rule_change", f"created {cur.lastrowid} ({body.day}/{body.type})"),
+        )
+        db.commit()
+    return {"id": cur.lastrowid}
+
+
+@app.put("/api/rules/{rule_id}", dependencies=[Depends(auth)])
+def update_rule(rule_id: int, body: RuleBody):
+    with get_db() as db:
+        db.execute(
+            """UPDATE rules SET day=?, type=?, anki_target=?, seterra_target_seconds=?,
+               duolingo_target_seconds=?, gaming_cap_seconds=?, earn_rate=?, priority=?
+               WHERE id=?""",
+            (body.day, body.type, body.anki_target, body.seterra_target_seconds,
+             body.duolingo_target_seconds, body.gaming_cap_seconds,
+             body.earn_rate, body.priority, rule_id),
+        )
+        db.execute(
+            "INSERT INTO events (ts, type, detail) VALUES (?,?,?)",
+            (time.time(), "rule_change", f"updated {rule_id}"),
+        )
+        db.commit()
+    return {"ok": True}
+
+
+@app.delete("/api/rules/{rule_id}", dependencies=[Depends(auth)])
+def delete_rule(rule_id: int):
+    with get_db() as db:
+        db.execute("DELETE FROM rules WHERE id=?", (rule_id,))
+        db.execute(
+            "INSERT INTO events (ts, type, detail) VALUES (?,?,?)",
+            (time.time(), "rule_change", f"deleted {rule_id}"),
+        )
+        db.commit()
+    return {"ok": True}
+
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+
+@app.get("/api/logs", dependencies=[Depends(auth)])
+def get_logs(limit: int = 50):
+    with get_db() as db:
+        rows = db.execute(
+            "SELECT * FROM events ORDER BY ts DESC LIMIT ?", (limit,)
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ── Update manifest (no auth — polled by Windows agent) ──────────────────────
+
+@app.get("/api/update")
+def get_update():
+    return {"version": VERSION, "url": None}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
