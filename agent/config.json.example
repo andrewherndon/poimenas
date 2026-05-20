@@ -1,5 +1,5 @@
 {
-    "server_url": "https://your-rpi.tailnet.ts.net",
+    "server_url": "http://192.168.1.xxx:8000",
     "api_key": "your-api-key-here",
     "blocked_processes": [
         "steam.exe",
