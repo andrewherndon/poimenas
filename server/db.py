@@ -46,7 +46,14 @@ CREATE TABLE IF NOT EXISTS events (
     type TEXT NOT NULL,
     detail TEXT
 );
+
+CREATE TABLE IF NOT EXISTS dns_allowlist (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    domain TEXT NOT NULL UNIQUE
+);
 """
+
+DEFAULT_DOMAINS = ["seterra.com", "duolingo.com"]
 
 
 def get_db() -> sqlite3.Connection:
@@ -62,4 +69,6 @@ def init_db():
         conn.execute(
             "INSERT OR IGNORE INTO lock_overrides (id, locked, reason, until_ts) VALUES (1, 0, '', 0)"
         )
+        for domain in DEFAULT_DOMAINS:
+            conn.execute("INSERT OR IGNORE INTO dns_allowlist (domain) VALUES (?)", (domain,))
         conn.commit()

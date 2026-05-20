@@ -2,16 +2,47 @@ from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, Literal
-import os, time
+import os, time, subprocess
 from datetime import datetime, date
+from pathlib import Path
 from dotenv import load_dotenv
 from db import get_db, init_db
 
 load_dotenv()
 
 app = FastAPI(title="Heimdall")
-API_KEY = os.environ["HEIMDALL_API_KEY"]
-VERSION = "0.1.0"
+API_KEY   = os.environ["HEIMDALL_API_KEY"]
+ROUTER_IP = os.environ.get("ROUTER_IP", "192.168.1.1")
+VERSION   = "0.1.0"
+
+HERE = Path(__file__).parent
+DNS_STAGING  = HERE / "dnsmasq_current.conf"
+APPLY_SCRIPT = HERE / "apply_dns.sh"
+
+
+# ── DNS ───────────────────────────────────────────────────────────────────────
+
+def _write_dns(locked: bool, domains: list[str]):
+    if locked:
+        lines = ["# heimdall - locked (allowlist)", "no-resolv", "cache-size=0", ""]
+        for d in domains:
+            lines.append(f"server=/{d}/8.8.8.8")
+        conf = "\n".join(lines) + "\n"
+    else:
+        conf = f"# heimdall - unlocked\nserver={ROUTER_IP}\ncache-size=1000\n"
+    DNS_STAGING.write_text(conf)
+    try:
+        subprocess.run(["sudo", str(APPLY_SCRIPT)], capture_output=True, timeout=10)
+    except Exception:
+        pass  # dnsmasq may not be installed during dev
+
+
+def apply_dns(locked: bool, db):
+    domains = [
+        r["domain"] for r in
+        db.execute("SELECT domain FROM dns_allowlist ORDER BY domain").fetchall()
+    ]
+    _write_dns(locked, domains)
 
 app.add_middleware(
     CORSMiddleware,
@@ -24,6 +55,9 @@ app.add_middleware(
 @app.on_event("startup")
 def startup():
     init_db()
+    with get_db() as db:
+        override = dict(db.execute("SELECT * FROM lock_overrides WHERE id=1").fetchone())
+        apply_dns(bool(override["locked"]), db)
 
 
 def auth(request: Request):
@@ -166,6 +200,7 @@ def set_lock(body: LockRequest):
             (time.time(), "lock" if body.locked else "unlock", body.reason),
         )
         db.commit()
+        apply_dns(body.locked, db)
     return {"ok": True}
 
 
@@ -293,6 +328,46 @@ def delete_rule(rule_id: int):
             (time.time(), "rule_change", f"deleted {rule_id}"),
         )
         db.commit()
+    return {"ok": True}
+
+
+# ── DNS Allowlist ─────────────────────────────────────────────────────────────
+
+class DomainBody(BaseModel):
+    domain: str
+
+
+@app.get("/api/dns/allowlist", dependencies=[Depends(auth)])
+def list_allowlist():
+    with get_db() as db:
+        rows = db.execute("SELECT * FROM dns_allowlist ORDER BY domain").fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.post("/api/dns/allowlist", dependencies=[Depends(auth)])
+def add_domain(body: DomainBody):
+    domain = body.domain.lower().strip().lstrip("www.").lstrip("https://").lstrip("http://").split("/")[0]
+    with get_db() as db:
+        db.execute("INSERT OR IGNORE INTO dns_allowlist (domain) VALUES (?)", (domain,))
+        db.execute("INSERT INTO events (ts, type, detail) VALUES (?,?,?)",
+                   (time.time(), "dns_allowlist", f"added {domain}"))
+        db.commit()
+        override = dict(db.execute("SELECT * FROM lock_overrides WHERE id=1").fetchone())
+        apply_dns(bool(override["locked"]), db)
+    return {"ok": True}
+
+
+@app.delete("/api/dns/allowlist/{domain_id}", dependencies=[Depends(auth)])
+def remove_domain(domain_id: int):
+    with get_db() as db:
+        row = db.execute("SELECT domain FROM dns_allowlist WHERE id=?", (domain_id,)).fetchone()
+        if row:
+            db.execute("DELETE FROM dns_allowlist WHERE id=?", (domain_id,))
+            db.execute("INSERT INTO events (ts, type, detail) VALUES (?,?,?)",
+                       (time.time(), "dns_allowlist", f"removed {row['domain']}"))
+            db.commit()
+            override = dict(db.execute("SELECT * FROM lock_overrides WHERE id=1").fetchone())
+            apply_dns(bool(override["locked"]), db)
     return {"ok": True}
 
 
