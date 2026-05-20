@@ -80,19 +80,37 @@ Andrew controls rules remotely from the dashboard. Rules are stored on the Linux
 └──────────────────────────────────────────────────┘
 ```
 
+## Web Policy (Allowlist via RPi DNS)
+
+Web blocking uses an **allowlist** approach — when locked, only explicitly permitted domains resolve. Everything else fails silently in all browsers.
+
+**How it works:**
+- The RPi runs `dnsmasq`, a lightweight DNS forwarder
+- The Windows machine's DNS is statically pointed to the RPi's local IP
+- A Windows Firewall rule (set by the installer) blocks outbound DNS (port 53) to any IP other than the RPi, preventing bypass by changing DNS settings
+- Chrome/Edge DoH (DNS-over-HTTPS) is disabled via registry policy
+
+**When locked:** dnsmasq resolves only the allowlisted domains (e.g. `seterra.com`, `duolingo.com`), returning NXDOMAIN for everything else. Works across all browsers and apps since it's OS-level.
+
+**When unlocked:** dnsmasq forwards all queries to the router's DNS. Normal browsing, zero added latency. dnsmasq caches responses, so repeat lookups are faster than before.
+
+**Performance:** DNS queries only happen at connection start. Actual traffic (games, video, web content) never touches the RPi. Local LAN DNS hop adds <1ms. No impact on gaming ping or connection quality.
+
+**Future:** Handling RPi/internet downtime gracefully (failsafe DNS behavior) is noted for a future iteration.
+
 ## Key Technical Decisions
 
-**Obfuscation over permission hardening.** Service is named and described to resemble a legitimate Windows system service. Executable lives in a system-looking path. Service ACL is set so it appears protected in Task Manager. Safe Mode is disabled via registry.
+**Obfuscation over permission hardening.** Service is named and described to resemble a legitimate Windows system service. Executable lives in a system-looking path. Task is hidden in Task Scheduler under an innocuous name. Safe Mode disabled via bcdedit in the installer.
+
+**Watchdog service.** A separate Windows Service (named to look like a system component) monitors the agent process and relaunches it if killed. This is the primary defense against Task Manager kills.
 
 **AnkiConnect as completion signal for Anki.** Anki runs locally on Windows and exposes a REST API on localhost:8765. The service polls this for daily review count against a configured threshold. Offline-capable, no scraping required.
 
-**Active-time tracking for web apps.** The service uses pywin32 to get the foreground window title and URL (via browser accessibility APIs or window title parsing). A 30-second idle timeout (no mouse/keyboard input) pauses the timer. This makes it hard to game by leaving a tab open.
+**Active-time tracking for web apps.** The agent monitors the foreground browser window title. A 30-second idle timeout (no mouse/keyboard input) pauses the timer, preventing the "leave it open and walk away" bypass.
 
-**Linux server as source of truth.** Lock state and rules are authoritative on the server, not the Windows machine. The Windows service is a dumb enforcer. Logs are synced off-device so they can't be tampered with locally.
+**Linux server as source of truth.** Lock state and rules are authoritative on the RPi, not the Windows machine. The Windows agent is a dumb enforcer. Logs are synced off-device.
 
-**Remote self-update via update manifest.** The Windows service periodically polls `/update` on the Linux server for a version hash. If the hash differs, it downloads a new binary/script and restarts itself. This allows Andrew to push changes to the Windows agent remotely from his Linux server without physical access. Updates are served over Tailscale (no public exposure). The Linux server itself can be updated via standard SSH.
-
-**Tailscale for networking.** No port forwarding, no public exposure. Both machines join a Tailscale network. Off-network access (e.g. from your phone) works transparently.
+**Tailscale for networking.** No port forwarding, no public exposure. Both machines join a Tailscale network. Off-network access works transparently.
 
 ## Deployment Notes
 
@@ -115,4 +133,5 @@ Andrew controls rules remotely from the dashboard. Rules are stored on the Linux
 | Networking | Tailscale |
 | Anki completion | AnkiConnect REST API |
 | Web active-time | pywin32 foreground window + input hooks |
+| Web policy | dnsmasq on RPi (allowlist) + Windows Firewall DNS lock |
 | Remote updates | Version manifest on RPi → Windows polls + self-replaces |
