@@ -1,0 +1,16 @@
+{
+    "server_url": "https://your-rpi.tailnet.ts.net",
+    "api_key": "your-api-key-here",
+    "blocked_processes": [
+        "steam.exe",
+        "epicgameslauncher.exe",
+        "gameoverlayui.exe",
+        "minecraft.exe",
+        "javaw.exe",
+        "robloxplayerbeta.exe"
+    ],
+    "web_targets": {
+        "seterra":  ["seterra.com", "seterra"],
+        "duolingo": ["duolingo.com", "duolingo"]
+    }
+}
