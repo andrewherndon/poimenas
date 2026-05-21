@@ -1,5 +1,5 @@
 """
-Run once on the Windows machine (as Administrator) to install Heimdall.
+Run once on the Windows machine (as Administrator) to install Poimenas.
 """
 import sys, shutil, subprocess, winreg
 from pathlib import Path

@@ -10,8 +10,8 @@ from db import get_db, init_db
 
 load_dotenv()
 
-app = FastAPI(title="Heimdall")
-API_KEY   = os.environ["HEIMDALL_API_KEY"]
+app = FastAPI(title="Poimenas")
+API_KEY   = os.environ["POIMENAS_API_KEY"]
 ROUTER_IP = os.environ.get("ROUTER_IP", "192.168.1.1")
 VERSION   = "0.1.0"
 
@@ -24,12 +24,12 @@ APPLY_SCRIPT = HERE / "apply_dns.sh"
 
 def _write_dns(locked: bool, domains: list[str]):
     if locked:
-        lines = ["# heimdall - locked (allowlist)", "no-resolv", "cache-size=0", ""]
+        lines = ["# poimenas - locked (allowlist)", "no-resolv", "cache-size=0", ""]
         for d in domains:
             lines.append(f"server=/{d}/8.8.8.8")
         conf = "\n".join(lines) + "\n"
     else:
-        conf = f"# heimdall - unlocked\nserver={ROUTER_IP}\ncache-size=1000\n"
+        conf = f"# poimenas - unlocked\nserver={ROUTER_IP}\ncache-size=1000\n"
     DNS_STAGING.write_text(conf)
     try:
         subprocess.run(["sudo", str(APPLY_SCRIPT)], capture_output=True, timeout=10)

@@ -1,7 +1,7 @@
 import sqlite3
 import os
 
-DB_PATH = os.environ.get("DB_PATH", "heimdall.db")
+DB_PATH = os.environ.get("DB_PATH", "poimenas.db")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS daily_stats (
