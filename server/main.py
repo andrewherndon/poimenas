@@ -371,6 +371,42 @@ def remove_domain(domain_id: int):
     return {"ok": True}
 
 
+# ── Health ────────────────────────────────────────────────────────────────────
+
+@app.get("/api/health", dependencies=[Depends(auth)])
+def get_health():
+    try:
+        result = subprocess.run(
+            ["systemctl", "is-active", "dnsmasq"],
+            capture_output=True, text=True, timeout=5,
+        )
+        dnsmasq_running = result.stdout.strip() == "active"
+    except Exception:
+        dnsmasq_running = False
+
+    try:
+        with get_db() as db:
+            override = dict(db.execute("SELECT locked FROM lock_overrides WHERE id=1").fetchone())
+            allowlist = [
+                dict(r) for r in
+                db.execute("SELECT id, domain FROM dns_allowlist ORDER BY domain").fetchall()
+            ]
+        db_ok = True
+        dns_locked = bool(override["locked"])
+    except Exception:
+        db_ok = False
+        dns_locked = False
+        allowlist = []
+
+    return {
+        "version": VERSION,
+        "db_ok": db_ok,
+        "dnsmasq_running": dnsmasq_running,
+        "dns_locked": dns_locked,
+        "allowlist": allowlist,
+    }
+
+
 # ── Logs ──────────────────────────────────────────────────────────────────────
 
 @app.get("/api/logs", dependencies=[Depends(auth)])
