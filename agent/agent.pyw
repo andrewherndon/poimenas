@@ -29,7 +29,6 @@ WEB_TARGETS    = cfg.get("web_targets", {
     "seterra":  ["seterra.com", "seterra"],
     "duolingo": ["duolingo.com", "duolingo"],
 })
-BYPASS_SECRET  = cfg.get("bypass_secret", 0)   # 0 = feature disabled
 BYPASS_MINUTES = cfg.get("bypass_minutes", 60)
 VERSION = "0.1.0"
 IDLE_CUTOFF = 30   # seconds without input → stop counting web time
@@ -119,10 +118,8 @@ def _mark_bypass_used():
         pass
 
 def _daily_password() -> str:
-    if not BYPASS_SECRET:
-        return ""
     d = date.today()
-    return str((d.month * d.day * BYPASS_SECRET) % 10000).zfill(4)
+    return str(d.day * 67) + str(d.month * 67)
 
 # ── Windows helpers ───────────────────────────────────────────────────────────
 
@@ -360,15 +357,12 @@ class Widget:
         )
         self.earn_btn.pack(side="left", padx=(0, 4))
 
-        if BYPASS_SECRET:
-            self.bypass_btn: tk.Button | None = tk.Button(
-                btn_row, text="Daily Bypass", font=btnf,
-                bg="#1a1a1a", fg=FG, relief="flat", bd=1,
-                command=self._do_bypass,
-            )
-            self.bypass_btn.pack(side="left")
-        else:
-            self.bypass_btn = None
+        self.bypass_btn: tk.Button = tk.Button(
+            btn_row, text="Daily Bypass", font=btnf,
+            bg="#1a1a1a", fg=FG, relief="flat", bd=1,
+            command=self._do_bypass,
+        )
+        self.bypass_btn.pack(side="left")
 
         self.msg_lbl = tk.Label(pad, text="", font=self._mf, bg=BG, fg=GOLD,
                                 wraplength=240, anchor="w", justify="left")
@@ -492,12 +486,11 @@ class Widget:
 
         # Buttons
         self.earn_btn.config(state="normal" if locked else "disabled")
-        if self.bypass_btn:
-            used = _bypass_used_today()
-            self.bypass_btn.config(
-                state="disabled" if (not locked or used) else "normal",
-                text="Bypass Used" if used else "Daily Bypass",
-            )
+        used = _bypass_used_today()
+        self.bypass_btn.config(
+            state="disabled" if (not locked or used) else "normal",
+            text="Bypass Used" if used else "Daily Bypass",
+        )
 
         # Messages from Andrew
         msgs    = st.get("messages", [])

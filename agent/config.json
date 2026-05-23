@@ -1,0 +1,20 @@
+{
+  "server_url": "http://192.168.1.157:8000",
+  "api_key": "6ce72944a2198a98685d417b4560924fe481e31e807f23aa831c47a797242899",
+  "rpi_local_ip": "192.168.1.157",
+  "blocked_processes": [
+    "robloxplayerbeta.exe",
+    "javaw.exe"
+  ],
+  "web_targets": {
+    "seterra": [
+      "seterra.com",
+      "seterra"
+    ],
+    "duolingo": [
+      "duolingo.com",
+      "duolingo"
+    ]
+  },
+  "bypass_minutes": 60
+}
