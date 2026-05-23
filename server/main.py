@@ -90,6 +90,10 @@ def compute_lock(rule, stats, override) -> tuple[bool, str]:
         if until == 0 or time.time() < until:
             return True, override["reason"] or "manual"
 
+    # Timed unlock (daily bypass from agent)
+    if not override["locked"] and override["until_ts"] > 0 and time.time() < override["until_ts"]:
+        return False, "bypass"
+
     if not rule:
         return False, ""
 
@@ -188,7 +192,7 @@ class LockRequest(BaseModel):
 @app.post("/api/lock", dependencies=[Depends(auth)])
 def set_lock(body: LockRequest):
     until_ts = 0.0
-    if body.locked and body.duration_minutes:
+    if body.duration_minutes:
         until_ts = time.time() + body.duration_minutes * 60
     with get_db() as db:
         db.execute(

@@ -57,25 +57,18 @@ def launch_agent():
 
 
 def fix_dns():
-    """Reset DNS to RPi if it has been changed."""
+    """Set DNS to RPi on every active non-Loopback, non-Tailscale adapter."""
     if not RPI_IP:
         return
     try:
-        out = subprocess.check_output(
+        subprocess.run(
             ["powershell", "-Command",
-             "(Get-DnsClientServerAddress -AddressFamily IPv4 "
-             "| Where-Object {$_.InterfaceAlias -notlike '*Loopback*'} "
-             "| Select-Object -First 1 -ExpandProperty ServerAddresses)"],
-            timeout=10, text=True,
+             f'Get-NetAdapter | Where-Object {{$_.Status -eq "Up" -and '
+             f'$_.InterfaceAlias -notlike "*Loopback*" -and '
+             f'$_.InterfaceAlias -notlike "*Tailscale*"}} | '
+             f'Set-DnsClientServerAddress -ServerAddresses ("{RPI_IP}")'],
+            capture_output=True, timeout=15,
         )
-        if RPI_IP not in out:
-            subprocess.run(
-                ["powershell", "-Command",
-                 f'Get-NetAdapter | Where-Object {{$_.Status -eq "Up" -and '
-                 f'$_.InterfaceAlias -notlike "*Loopback*"}} | '
-                 f'Set-DnsClientServerAddress -ServerAddresses ("{RPI_IP}")'],
-                timeout=10,
-            )
     except Exception as e:
         log.warning("fix_dns failed: %s", e)
 
