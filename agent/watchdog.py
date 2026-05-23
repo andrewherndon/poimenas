@@ -73,6 +73,19 @@ def fix_dns():
         log.warning("fix_dns failed: %s", e)
 
 
+def fix_tailscale():
+    """Restart Tailscale service if it has stopped."""
+    try:
+        result = subprocess.run(
+            ["sc", "query", "Tailscale"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if "RUNNING" not in result.stdout:
+            subprocess.run(["net", "start", "Tailscale"], capture_output=True, timeout=15)
+    except Exception as e:
+        log.warning("fix_tailscale failed: %s", e)
+
+
 def fix_doh():
     """Ensure DNS-over-HTTPS is disabled in Chrome and Edge."""
     policy_paths = [
@@ -116,10 +129,11 @@ class WatchdogService(win32serviceutil.ServiceFramework):
             if not agent_running():
                 launch_agent()
 
-            # Every ~60s: enforce DNS and DoH policy
+            # Every ~60s: enforce DNS, DoH policy, and Tailscale
             if tick % 6 == 0:
                 fix_dns()
                 fix_doh()
+                fix_tailscale()
 
             tick += 1
             win32event.WaitForSingleObject(self.stop_event, 10000)

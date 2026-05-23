@@ -72,14 +72,16 @@ def today() -> str:
 
 def get_active_rule(db):
     today_str = today()
-    weekday = datetime.today().strftime("%a").lower()  # mon, tue, ...
+    weekday = datetime.today().strftime("%a").lower()
+    hour = datetime.today().hour
     row = db.execute(
         """SELECT * FROM rules
            WHERE day IN (?, ?, 'default')
+           AND (start_hour IS NULL OR (? >= start_hour AND ? < end_hour))
            ORDER BY CASE day WHEN ? THEN 2 WHEN ? THEN 1 ELSE 0 END DESC,
                     priority DESC
            LIMIT 1""",
-        (today_str, weekday, today_str, weekday),
+        (today_str, weekday, hour, hour, today_str, weekday),
     ).fetchone()
     return dict(row) if row else None
 
@@ -90,9 +92,9 @@ def compute_lock(rule, stats, override) -> tuple[bool, str]:
         if until == 0 or time.time() < until:
             return True, override["reason"] or "manual"
 
-    # Timed unlock (daily bypass from agent)
+    # Timed unlock (daily bypass or approved extension)
     if not override["locked"] and override["until_ts"] > 0 and time.time() < override["until_ts"]:
-        return False, "bypass"
+        return False, override["reason"] or "bypass"
 
     if not rule:
         return False, ""
@@ -161,6 +163,11 @@ def get_status():
             ).fetchall()
         ]
 
+        ext_row = db.execute(
+            "SELECT * FROM extension_requests WHERE status='pending' ORDER BY ts DESC LIMIT 1"
+        ).fetchone()
+        pending_ext = dict(ext_row) if ext_row else None
+
     return {
         "locked": locked,
         "reason": reason,
@@ -178,6 +185,7 @@ def get_status():
         },
         "rule": rule,
         "pending_messages": msgs,
+        "pending_extension": pending_ext,
     }
 
 
@@ -237,6 +245,7 @@ class HeartbeatRequest(BaseModel):
     seterra_active_seconds: int = 0
     duolingo_active_seconds: int = 0
     gaming_seconds: int = 0
+    process_times: dict[str, int] = {}
 
 
 @app.post("/api/heartbeat", dependencies=[Depends(auth)])
@@ -260,6 +269,12 @@ def heartbeat(body: HeartbeatRequest):
                 time.time(), body.agent_version,
             ),
         )
+        for proc, secs in body.process_times.items():
+            db.execute(
+                """INSERT INTO process_stats (date, process, seconds) VALUES (?,?,?)
+                   ON CONFLICT(date, process) DO UPDATE SET seconds=excluded.seconds""",
+                (today(), proc[:64], secs),
+            )
         db.execute("UPDATE pending_messages SET delivered=1 WHERE delivered=0")
         db.commit()
     return {"ok": True}
@@ -276,6 +291,8 @@ class RuleBody(BaseModel):
     gaming_cap_seconds: int = 7200
     earn_rate: float = 2.0
     priority: int = 0
+    start_hour: Optional[int] = None
+    end_hour: Optional[int] = None
 
 
 @app.get("/api/rules", dependencies=[Depends(auth)])
@@ -291,10 +308,11 @@ def create_rule(body: RuleBody):
         cur = db.execute(
             """INSERT INTO rules
                    (day, type, anki_target, seterra_target_seconds, duolingo_target_seconds,
-                    gaming_cap_seconds, earn_rate, priority)
-               VALUES (?,?,?,?,?,?,?,?)""",
+                    gaming_cap_seconds, earn_rate, priority, start_hour, end_hour)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
             (body.day, body.type, body.anki_target, body.seterra_target_seconds,
-             body.duolingo_target_seconds, body.gaming_cap_seconds, body.earn_rate, body.priority),
+             body.duolingo_target_seconds, body.gaming_cap_seconds, body.earn_rate,
+             body.priority, body.start_hour, body.end_hour),
         )
         db.execute(
             "INSERT INTO events (ts, type, detail) VALUES (?,?,?)",
@@ -309,11 +327,12 @@ def update_rule(rule_id: int, body: RuleBody):
     with get_db() as db:
         db.execute(
             """UPDATE rules SET day=?, type=?, anki_target=?, seterra_target_seconds=?,
-               duolingo_target_seconds=?, gaming_cap_seconds=?, earn_rate=?, priority=?
+               duolingo_target_seconds=?, gaming_cap_seconds=?, earn_rate=?, priority=?,
+               start_hour=?, end_hour=?
                WHERE id=?""",
             (body.day, body.type, body.anki_target, body.seterra_target_seconds,
              body.duolingo_target_seconds, body.gaming_cap_seconds,
-             body.earn_rate, body.priority, rule_id),
+             body.earn_rate, body.priority, body.start_hour, body.end_hour, rule_id),
         )
         db.execute(
             "INSERT INTO events (ts, type, detail) VALUES (?,?,?)",
@@ -330,6 +349,81 @@ def delete_rule(rule_id: int):
         db.execute(
             "INSERT INTO events (ts, type, detail) VALUES (?,?,?)",
             (time.time(), "rule_change", f"deleted {rule_id}"),
+        )
+        db.commit()
+    return {"ok": True}
+
+
+# ── Extension requests ────────────────────────────────────────────────────────
+
+class ExtensionBody(BaseModel):
+    reason: str = ""
+    duration_minutes: int = 30
+
+
+@app.post("/api/extension", dependencies=[Depends(auth)])
+def request_extension(body: ExtensionBody):
+    with get_db() as db:
+        cur = db.execute(
+            "INSERT INTO extension_requests (ts, reason, duration_minutes) VALUES (?,?,?)",
+            (time.time(), body.reason, body.duration_minutes),
+        )
+        db.execute(
+            "INSERT INTO events (ts, type, detail) VALUES (?,?,?)",
+            (time.time(), "extension_request",
+             f"requested {body.duration_minutes}m: {body.reason}"),
+        )
+        db.commit()
+    return {"id": cur.lastrowid}
+
+
+@app.get("/api/extension/pending", dependencies=[Depends(auth)])
+def get_pending_extensions():
+    with get_db() as db:
+        rows = db.execute(
+            "SELECT * FROM extension_requests WHERE status='pending' ORDER BY ts DESC"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.post("/api/extension/{ext_id}/approve", dependencies=[Depends(auth)])
+def approve_extension(ext_id: int):
+    with get_db() as db:
+        row = db.execute(
+            "SELECT * FROM extension_requests WHERE id=?", (ext_id,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "Not found")
+        row = dict(row)
+        until_ts = time.time() + row["duration_minutes"] * 60
+        db.execute(
+            "UPDATE extension_requests SET status='approved', resolved_ts=? WHERE id=?",
+            (time.time(), ext_id),
+        )
+        db.execute(
+            "UPDATE lock_overrides SET locked=0, reason='extension', until_ts=? WHERE id=1",
+            (until_ts,),
+        )
+        db.execute(
+            "INSERT INTO events (ts, type, detail) VALUES (?,?,?)",
+            (time.time(), "extension_approved",
+             f"approved {row['duration_minutes']}m for: {row['reason']}"),
+        )
+        db.commit()
+        apply_dns(False, db)
+    return {"ok": True}
+
+
+@app.post("/api/extension/{ext_id}/deny", dependencies=[Depends(auth)])
+def deny_extension(ext_id: int):
+    with get_db() as db:
+        db.execute(
+            "UPDATE extension_requests SET status='denied', resolved_ts=? WHERE id=?",
+            (time.time(), ext_id),
+        )
+        db.execute(
+            "INSERT INTO events (ts, type, detail) VALUES (?,?,?)",
+            (time.time(), "extension_denied", f"denied {ext_id}"),
         )
         db.commit()
     return {"ok": True}
@@ -373,6 +467,18 @@ def remove_domain(domain_id: int):
             override = dict(db.execute("SELECT * FROM lock_overrides WHERE id=1").fetchone())
             apply_dns(bool(override["locked"]), db)
     return {"ok": True}
+
+
+# ── Stats ─────────────────────────────────────────────────────────────────────
+
+@app.get("/api/stats/processes", dependencies=[Depends(auth)])
+def get_process_stats(date: str = None):
+    d = date or today()
+    with get_db() as db:
+        rows = db.execute(
+            "SELECT * FROM process_stats WHERE date=? ORDER BY seconds DESC", (d,)
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 # ── Health ────────────────────────────────────────────────────────────────────

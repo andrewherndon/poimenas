@@ -37,7 +37,25 @@ CREATE TABLE IF NOT EXISTS rules (
     duolingo_target_seconds INTEGER DEFAULT 0,
     gaming_cap_seconds INTEGER DEFAULT 7200,
     earn_rate REAL DEFAULT 2.0,
-    priority INTEGER DEFAULT 0
+    priority INTEGER DEFAULT 0,
+    start_hour INTEGER,
+    end_hour INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS extension_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL,
+    reason TEXT DEFAULT '',
+    duration_minutes INTEGER DEFAULT 30,
+    status TEXT DEFAULT 'pending',
+    resolved_ts REAL
+);
+
+CREATE TABLE IF NOT EXISTS process_stats (
+    date TEXT NOT NULL,
+    process TEXT NOT NULL,
+    seconds INTEGER DEFAULT 0,
+    PRIMARY KEY (date, process)
 );
 
 CREATE TABLE IF NOT EXISTS events (
@@ -71,4 +89,12 @@ def init_db():
         )
         for domain in DEFAULT_DOMAINS:
             conn.execute("INSERT OR IGNORE INTO dns_allowlist (domain) VALUES (?)", (domain,))
+
+        # Migrations for existing DBs
+        for col in ("start_hour", "end_hour"):
+            try:
+                conn.execute(f"ALTER TABLE rules ADD COLUMN {col} INTEGER")
+            except Exception:
+                pass
+
         conn.commit()

@@ -31,9 +31,9 @@ WEB_TARGETS    = cfg.get("web_targets", {
 })
 BYPASS_MINUTES = cfg.get("bypass_minutes", 60)
 VERSION = "0.1.0"
-IDLE_CUTOFF = 30   # seconds without input → stop counting web time
+IDLE_CUTOFF = 30
 POLL_SECS   = 30
-WARN_AT     = [3600, 1800, 900, 300]  # remaining seconds that trigger a warning
+WARN_AT     = [3600, 1800, 900, 300]
 
 HEADERS = {"Authorization": f"Bearer {KEY}", "Content-Type": "application/json"}
 
@@ -55,6 +55,7 @@ _state: dict = dict(
     gaming_secs=0,   gaming_cap=None,
     rule_type="",    earn_rate=2.0,
     warning_text="", warning_until=0.0,
+    pending_extension=None,
 )
 
 def gs(k):
@@ -68,24 +69,25 @@ def snap():
 
 # ── Daily counters (reset at midnight) ───────────────────────────────────────
 
-_cnt_mu   = threading.Lock()
-_day      = date.today().isoformat()
-_seterra  = 0
-_duolingo = 0
-_gaming   = 0
-_warned: set = set()   # thresholds (seconds) already warned today
+_cnt_mu    = threading.Lock()
+_day       = date.today().isoformat()
+_seterra   = 0
+_duolingo  = 0
+_gaming    = 0
+_proc_times: dict[str, int] = {}
+_warned: set = set()
 
 def _maybe_reset():
-    global _day, _seterra, _duolingo, _gaming, _warned
+    global _day, _seterra, _duolingo, _gaming, _proc_times, _warned
     with _cnt_mu:
         today = date.today().isoformat()
         if today != _day:
             _day, _seterra, _duolingo, _gaming = today, 0, 0, 0
-            _warned = set()
+            _proc_times, _warned = {}, set()
 
 def _counts():
     with _cnt_mu:
-        return _seterra, _duolingo, _gaming
+        return _seterra, _duolingo, _gaming, dict(_proc_times)
 
 def _check_warn(g_secs: int, g_cap: int):
     global _warned
@@ -99,7 +101,7 @@ def _check_warn(g_secs: int, g_cap: int):
                     warning_text=f"{mins} min of screen time remaining",
                     warning_until=time.time() + 45,
                 )
-                break   # one warning per poll; next threshold fires next time
+                break
 
 # ── Bypass ────────────────────────────────────────────────────────────────────
 
@@ -140,12 +142,12 @@ def fg_browser_title() -> str:
         pass
     return ""
 
-def blocked_running() -> bool:
+def running_blocked_names() -> set[str]:
     try:
-        names = {p.name().lower() for p in psutil.process_iter(["name"])}
-        return bool(names & BLOCKED_PROCS)
+        return {p.name().lower() for p in psutil.process_iter(["name"])
+                if p.name().lower() in BLOCKED_PROCS}
     except Exception:
-        return False
+        return set()
 
 def suspend_blocked():
     for p in psutil.process_iter(["name"]):
@@ -189,7 +191,7 @@ def fmt_time(secs: int) -> str:
 # ── Tick loop — 1 s, tracks active time ──────────────────────────────────────
 
 def tick_loop():
-    global _seterra, _duolingo, _gaming
+    global _seterra, _duolingo, _gaming, _proc_times
     while True:
         time.sleep(1)
         _maybe_reset()
@@ -201,8 +203,12 @@ def tick_loop():
                 _seterra += 1
             elif any(kw in title for kw in WEB_TARGETS.get("duolingo", [])):
                 _duolingo += 1
-            if not gs("locked") and blocked_running():
-                _gaming += 1
+            if not gs("locked"):
+                running = running_blocked_names()
+                if running:
+                    _gaming += 1
+                    for name in running:
+                        _proc_times[name] = _proc_times.get(name, 0) + 1
 
 # ── Poll loop — 30 s, talks to server ────────────────────────────────────────
 
@@ -211,7 +217,7 @@ def poll_loop():
     while True:
         _maybe_reset()
         anki = anki_today()
-        s, d, g = _counts()
+        s, d, g, procs = _counts()
 
         try:
             status = requests.get(
@@ -232,6 +238,7 @@ def poll_loop():
                 gaming_secs=g,      gaming_cap=t.get("gaming_cap_seconds"),
                 rule_type=rule.get("type", ""),
                 earn_rate=rule.get("earn_rate", 2.0),
+                pending_extension=status.get("pending_extension"),
             )
 
             if locked and not was_locked:
@@ -257,6 +264,7 @@ def poll_loop():
                     "seterra_active_seconds": s,
                     "duolingo_active_seconds": d,
                     "gaming_seconds": g,
+                    "process_times": procs,
                 },
             )
         except Exception as e:
@@ -282,7 +290,7 @@ REASON_TEXT = {
 }
 
 WIDGET_W = 270
-WIDGET_H = 275
+WIDGET_H = 300
 
 
 def _widget_pos() -> tuple[int, int]:
@@ -346,23 +354,34 @@ class Widget:
         self.warn_lbl = tk.Label(pad, text="", font=sf, bg=BG, fg=ORG, anchor="w")
         self.warn_lbl.pack(fill="x", pady=(2, 0))
 
-        # Buttons (earn info + optional bypass)
-        btn_row = tk.Frame(pad, bg=BG)
-        btn_row.pack(fill="x", pady=(4, 0))
+        # Button row 1: Request Extension + Daily Bypass
+        btn_row1 = tk.Frame(pad, bg=BG)
+        btn_row1.pack(fill="x", pady=(4, 0))
 
-        self.earn_btn = tk.Button(
-            btn_row, text="How to Unlock", font=btnf,
-            bg="#1a1a1a", fg=GOLD, relief="flat", bd=1,
-            command=self._show_earn_info,
+        self.ext_btn = tk.Button(
+            btn_row1, text="Request Extension", font=btnf,
+            bg="#1a1a1a", fg=GRN, relief="flat", bd=1,
+            command=self._request_extension,
         )
-        self.earn_btn.pack(side="left", padx=(0, 4))
+        self.ext_btn.pack(side="left", padx=(0, 4))
 
-        self.bypass_btn: tk.Button = tk.Button(
-            btn_row, text="Daily Bypass", font=btnf,
+        self.bypass_btn = tk.Button(
+            btn_row1, text="Daily Bypass", font=btnf,
             bg="#1a1a1a", fg=FG, relief="flat", bd=1,
             command=self._do_bypass,
         )
         self.bypass_btn.pack(side="left")
+
+        # Button row 2: How to Unlock (info)
+        btn_row2 = tk.Frame(pad, bg=BG)
+        btn_row2.pack(fill="x", pady=(2, 0))
+
+        self.earn_btn = tk.Button(
+            btn_row2, text="How to Unlock", font=btnf,
+            bg="#1a1a1a", fg=GOLD, relief="flat", bd=1,
+            command=self._show_earn_info,
+        )
+        self.earn_btn.pack(side="left")
 
         self.msg_lbl = tk.Label(pad, text="", font=self._mf, bg=BG, fg=GOLD,
                                 wraplength=240, anchor="w", justify="left")
@@ -372,6 +391,34 @@ class Widget:
         self.foot_lbl.pack(fill="x", pady=(4, 0))
 
     # ── Button actions ────────────────────────────────────────────────────────
+
+    def _request_extension(self):
+        ext = snap().get("pending_extension")
+        if ext and ext.get("status") == "pending":
+            messagebox.showinfo(
+                "Extension", "Extension already pending — waiting for approval.",
+                parent=self.root,
+            )
+            return
+        reason = simpledialog.askstring(
+            "Request Extension", "Why do you need more time?",
+            parent=self.root,
+        )
+        if reason is None:
+            return
+        try:
+            r = requests.post(
+                f"{SERVER}/api/extension", headers=HEADERS, timeout=8,
+                json={"reason": reason, "duration_minutes": 30},
+            )
+            if r.ok:
+                messagebox.showinfo(
+                    "Extension", "Request sent. Waiting for Andrew to approve.",
+                    parent=self.root,
+                )
+        except Exception as e:
+            log.warning("extension request failed: %s", e)
+            messagebox.showerror("Extension", "Could not reach server.", parent=self.root)
 
     def _show_earn_info(self):
         st = snap()
@@ -426,7 +473,6 @@ class Widget:
             except Exception as e:
                 log.warning("bypass request failed: %s", e)
                 messagebox.showerror("Daily Bypass", "Could not reach server.", parent=self.root)
-        # wrong code: silent fail
 
     # ── Blink helpers ─────────────────────────────────────────────────────────
 
@@ -448,7 +494,7 @@ class Widget:
             return f"{done}{val} / {target}" if is_anki else f"{done}{fmt_time(val)} / {fmt_time(target)}"
         return str(val) if is_anki else fmt_time(val)
 
-    # ── Tick ──────────────────────────────────────────────────────────────────
+    # ── Update ────────────────────────────────────────────────────────────────
 
     def _update(self, st: dict):
         locked = st["locked"]
@@ -478,19 +524,30 @@ class Widget:
                 self._last_warn = w_text
                 self.warn_lbl.config(text=w_text, fg=ORG)
                 self._blink_warn(6)
-            # else: already showing, leave it
         else:
             self.warn_lbl.config(text="")
             if not w_text:
                 self._last_warn = ""
 
         # Buttons
-        self.earn_btn.config(state="normal" if locked else "disabled")
-        used = _bypass_used_today()
-        self.bypass_btn.config(
-            state="disabled" if (not locked or used) else "normal",
-            text="Bypass Used" if used else "Daily Bypass",
-        )
+        ext = st.get("pending_extension")
+        ext_pending = ext and ext.get("status") == "pending"
+
+        if locked:
+            self.ext_btn.config(
+                state="disabled" if ext_pending else "normal",
+                text="Waiting..." if ext_pending else "Request Extension",
+            )
+            self.earn_btn.config(state="normal")
+            used = _bypass_used_today()
+            self.bypass_btn.config(
+                state="disabled" if used else "normal",
+                text="Bypass Used" if used else "Daily Bypass",
+            )
+        else:
+            self.ext_btn.config(state="disabled", text="Request Extension")
+            self.earn_btn.config(state="disabled")
+            self.bypass_btn.config(state="disabled", text="Daily Bypass")
 
         # Messages from Andrew
         msgs    = st.get("messages", [])
