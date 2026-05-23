@@ -223,118 +223,125 @@ GRN  = "#4ade80"
 DIM  = "#666666"
 
 REASON_TEXT = {
-    "prerequisite": "Finish your daily tasks to unlock games",
-    "cap_exceeded":  "Daily screen time limit reached",
-    "manual":        "Computer locked by Andrew",
+    "prerequisite": "Finish your daily tasks",
+    "cap_exceeded":  "Screen time limit reached",
+    "manual":        "Locked by Andrew",
     "":              "Locked",
 }
 
-class Overlay:
+WIDGET_W = 270
+WIDGET_H = 225
+
+
+def _widget_pos() -> tuple[int, int]:
+    """Bottom-right corner of the non-primary monitor, or primary if only one."""
+    try:
+        primary = secondary = None
+        for m in win32api.EnumDisplayMonitors():
+            info = win32api.GetMonitorInfo(m[0])
+            l, t, r, b = info['Monitor']
+            if info['Flags'] & 1:
+                primary = (l, t, r, b)
+            else:
+                secondary = (l, t, r, b)
+        l, t, r, b = secondary if secondary else primary
+        return r - WIDGET_W - 16, b - WIDGET_H - 48
+    except Exception:
+        return 1620, 820
+
+
+class Widget:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.withdraw()
-        self._visible = False
+        self._last_msg = ""
         self._build()
-        self.root.after(1000, self._tick)
+        self.root.after(2000, self._tick)
 
     def _build(self):
         r = self.root
-        r.title("Windows Diagnostic Core")
+        x, y = _widget_pos()
+        r.title("Anti-Brainrot System")
         r.configure(bg=BG)
-        r.attributes("-fullscreen", True)
+        r.geometry(f"{WIDGET_W}x{WIDGET_H}+{x}+{y}")
         r.attributes("-topmost", True)
-        r.protocol("WM_DELETE_WINDOW", lambda: None)
-        r.bind("<Alt-F4>", lambda e: "break")
-        r.bind("<Escape>",  lambda e: "break")
+        r.resizable(False, False)
 
-        sf  = tkfont.Font(family="Segoe UI", size=11)
-        hf  = tkfont.Font(family="Segoe UI", size=20, weight="bold")
-        bf  = tkfont.Font(family="Segoe UI", size=13)
-        mf  = tkfont.Font(family="Segoe UI", size=13)
+        sf = tkfont.Font(family="Segoe UI", size=9)
+        bf = tkfont.Font(family="Segoe UI", size=10, weight="bold")
+        self._mf = tkfont.Font(family="Segoe UI", size=11, weight="bold")
 
-        wrap = tk.Frame(r, bg=BG)
-        wrap.place(relx=0.5, rely=0.5, anchor="center")
+        pad = tk.Frame(r, bg=BG, padx=12, pady=10)
+        pad.pack(fill="both", expand=True)
 
-        self.title_lbl = tk.Label(wrap, text="", font=hf, bg=BG, fg=FG)
-        self.title_lbl.pack(pady=(0, 4))
+        self.status_lbl = tk.Label(pad, text="", font=bf, bg=BG, fg=FG, anchor="w")
+        self.status_lbl.pack(fill="x", pady=(0, 6))
 
-        self.sub_lbl = tk.Label(wrap, text="", font=sf, bg=BG, fg=DIM)
-        self.sub_lbl.pack(pady=(0, 32))
+        self._rows: dict[str, tk.Label] = {}
+        for key, label in [("anki", "Anki"), ("seterra", "Seterra"), ("duolingo", "Duolingo")]:
+            row = tk.Frame(pad, bg=BG)
+            row.pack(fill="x", pady=1)
+            tk.Label(row, text=f"{label}:", font=sf, bg=BG, fg=DIM,
+                     width=9, anchor="w").pack(side="left")
+            val = tk.Label(row, text="—", font=sf, bg=BG, fg=FG, anchor="w")
+            val.pack(side="left")
+            self._rows[key] = val
 
-        # Progress rows
-        grid = tk.Frame(wrap, bg=BG)
-        grid.pack()
+        self.gaming_lbl = tk.Label(pad, text="", font=sf, bg=BG, fg=DIM, anchor="w")
+        self.gaming_lbl.pack(fill="x", pady=(4, 0))
 
-        self._rows: dict[str, tuple] = {}
-        for i, (key, label) in enumerate([
-            ("anki",     "Anki cards"),
-            ("seterra",  "Seterra"),
-            ("duolingo", "Duolingo"),
-        ]):
-            tk.Label(grid, text=label, font=sf, bg=BG, fg=DIM,
-                     width=12, anchor="e").grid(row=i, column=0, padx=(0, 14), pady=6)
-            val = tk.Label(grid, text="—", font=bf, bg=BG, fg=FG, width=18, anchor="w")
-            val.grid(row=i, column=1, pady=6)
-            bar = tk.Canvas(grid, width=200, height=6,
-                            bg="#220000", highlightthickness=0)
-            bar.grid(row=i, column=2, padx=(12, 0), pady=6)
-            self._rows[key] = (val, bar)
+        self.msg_lbl = tk.Label(pad, text="", font=self._mf, bg=BG, fg=GOLD,
+                                wraplength=240, anchor="w", justify="left")
+        self.msg_lbl.pack(fill="x", pady=(6, 0))
 
-        # Message
-        self.msg_lbl = tk.Label(wrap, text="", font=mf, bg=BG, fg=GOLD,
-                                wraplength=520)
-        self.msg_lbl.pack(pady=(36, 0))
+        self.foot_lbl = tk.Label(pad, text="", font=sf, bg=BG, fg=DIM, anchor="w")
+        self.foot_lbl.pack(fill="x", pady=(6, 0))
 
-        # Footer
-        self.foot_lbl = tk.Label(wrap, text="", font=sf, bg=BG, fg=DIM)
-        self.foot_lbl.pack(pady=(20, 0))
+    def _blink(self, count: int = 6):
+        color = BG if count % 2 == 0 else GOLD
+        self.msg_lbl.config(fg=color)
+        if count > 0:
+            self.root.after(300, lambda: self._blink(count - 1))
 
-    def _set_bar(self, key: str, val: int, cap: int):
-        lbl, canvas = self._rows[key]
-        if cap > 0:
-            pct = min(1.0, val / cap)
-            done = pct >= 1.0
-            color = GRN if done else GOLD
-            text = (f"{val} / {cap}" if key == "anki"
-                    else f"{fmt_time(val)} / {fmt_time(cap)}")
-            canvas.delete("all")
-            canvas.create_rectangle(0, 0, int(200 * pct), 6, fill=color, outline="")
-        else:
-            # No target — show raw value, no bar
-            text = str(val) if key == "anki" else fmt_time(val)
-            canvas.delete("all")
-        lbl.config(text=text, fg=FG)
+    def _row_text(self, val: int, target: int, is_anki: bool = False) -> str:
+        if target > 0:
+            done = "[+] " if val >= target else ""
+            return f"{done}{val} / {target}" if is_anki else f"{done}{fmt_time(val)} / {fmt_time(target)}"
+        return str(val) if is_anki else fmt_time(val)
 
     def _update(self, st: dict):
-        self.title_lbl.config(text=REASON_TEXT.get(st["reason"], "Locked"))
-        self.sub_lbl.config(text=f"Gaming and entertainment are currently restricted.")
-
-        self._set_bar("anki",     st["anki_cards"],    st["anki_target"])
-        self._set_bar("seterra",  st["seterra_secs"],  st["seterra_target"])
-        self._set_bar("duolingo", st["duolingo_secs"], st["duolingo_target"])
-
-        msgs = st.get("messages", [])
-        self.msg_lbl.config(text=msgs[-1]["text"] if msgs else "")
-
-        ok = st["server_ok"]
-        self.foot_lbl.config(
-            text="● connected" if ok else "○ server unreachable",
-            fg=GRN if ok else RED,
+        locked = st["locked"]
+        self.status_lbl.config(
+            text=f"LOCKED  {REASON_TEXT.get(st['reason'], '')}" if locked else "Unlocked",
+            fg=RED if locked else GRN,
         )
 
-    def _tick(self):
-        st = snap()
-        if st["locked"]:
-            if not self._visible:
-                self.root.deiconify()
-                self.root.lift()
-                self.root.attributes("-topmost", True)
-                self._visible = True
-            self._update(st)
+        self._rows["anki"].config(text=self._row_text(st["anki_cards"], st["anki_target"], True))
+        self._rows["seterra"].config(text=self._row_text(st["seterra_secs"], st["seterra_target"]))
+        self._rows["duolingo"].config(text=self._row_text(st["duolingo_secs"], st["duolingo_target"]))
+
+        cap = st.get("gaming_cap")
+        g = st["gaming_secs"]
+        if cap:
+            self.gaming_lbl.config(text=f"Gaming: {fmt_time(g)} / {fmt_time(cap)}  ({fmt_time(max(0, cap - g))} left)")
         else:
-            if self._visible:
-                self.root.withdraw()
-                self._visible = False
+            self.gaming_lbl.config(text=f"Gaming: {fmt_time(g)}")
+
+        msgs = st.get("messages", [])
+        new_msg = msgs[-1]["text"] if msgs else ""
+        if new_msg != self._last_msg:
+            self._last_msg = new_msg
+            self.msg_lbl.config(text=new_msg)
+            if new_msg:
+                self._blink(6)
+        elif not new_msg:
+            self.msg_lbl.config(text="")
+
+        ok = st["server_ok"]
+        self.foot_lbl.config(text="● connected" if ok else "○ server unreachable",
+                             fg=GRN if ok else RED)
+
+    def _tick(self):
+        self._update(snap())
         self.root.after(2000, self._tick)
 
     def run(self):
@@ -345,4 +352,4 @@ class Overlay:
 if __name__ == "__main__":
     for fn, name in [(tick_loop, "tick"), (poll_loop, "poll")]:
         threading.Thread(target=fn, name=name, daemon=True).start()
-    Overlay().run()
+    Widget().run()

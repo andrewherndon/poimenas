@@ -24,7 +24,7 @@ APPLY_SCRIPT = HERE / "apply_dns.sh"
 
 def _write_dns(locked: bool, domains: list[str]):
     if locked:
-        lines = ["# poimenas - locked (allowlist)", "no-resolv", "cache-size=0", ""]
+        lines = ["# poimenas - locked (allowlist)", "no-resolv", "address=/#/0.0.0.0", "cache-size=0", ""]
         for d in domains:
             lines.append(f"server=/{d}/8.8.8.8")
         conf = "\n".join(lines) + "\n"

@@ -16,8 +16,7 @@ def copy_files(src: Path):
             print(f"  copied {f}")
 
 def install_deps():
-    pip = Path(sys.executable).parent / "pip.exe"
-    subprocess.run([str(pip), "install", "-r", str(INSTALL_DIR / "requirements.txt")], check=True)
+    subprocess.run([sys.executable, "-m", "pip", "install", "-r", str(INSTALL_DIR / "requirements.txt")], check=True)
 
 def install_agent_task():
     pythonw = Path(sys.executable).parent / "pythonw.exe"

